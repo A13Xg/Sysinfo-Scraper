@@ -5,10 +5,10 @@ A small BATCH script that is designed to extract system info quickly and dump to
 
 How to Install:
 
-1. Download the whole repository as a compressed *.zip* file and then run 'Deploy.bat as Administrator.
+1. Download the whole repository as a compressed *.zip* file and then run 'Scrape.bat' as Administrator.
 
 
-***Note: This batch file will not work without Admin priveleges***
+***Note: This batch file will work without Admin priveleges***
 
 
 
