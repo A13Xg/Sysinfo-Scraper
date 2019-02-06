@@ -55,4 +55,4 @@ Creative Commons public licenses provide a standard set of terms and conditions 
 
 ### MD5 Hashes: ###
 
- > v0.3 'MD5: c9c84d0c9fa4c4ec136dbdb4617dd391'
+ > v0.2 'MD5: 6214a9aac4773c8f0863113793e978b3'
