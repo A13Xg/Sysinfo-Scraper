@@ -20,7 +20,7 @@ How to Install:
 
 
 ## License Information: ##
- 
+
 This repository and these scripts are brought to you and the general public under the 'Creative Commons > Attribution-NonCommercial-ShareAlike 4.0 International License' (CC BY-NC-SA 4.0)
 
 
@@ -56,5 +56,7 @@ Creative Commons public licenses provide a standard set of terms and conditions 
 ### MD5 Hashes: ###
 
  > v0.2 'MD5: 6214a9aac4773c8f0863113793e978b3'
- 
+
  > v0.3 'MD5: fc3e11101f33b540274f819903bda4c2'
+
+ > v0.4 'MD5: c895090b636384d877b3e4db50defc2a'
