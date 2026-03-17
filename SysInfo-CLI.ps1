@@ -53,9 +53,27 @@ param(
 # ── Script-level state ──────────────────────────────────────────────────────────
 $script:ScanData = $null
 
+# Step labels used during scanning – single source of truth
+$script:ScanStepLabels = @(
+    'Collecting system overview...'
+    'Collecting operating system info...'
+    'Collecting processor info...'
+    'Collecting memory info...'
+    'Collecting storage info...'
+    'Collecting graphics info...'
+    'Collecting network adapter info...'
+    'Collecting BIOS info...'
+    'Collecting motherboard info...'
+    'Collecting battery info...'
+    'Collecting hotfixes and startup programs...'
+)
+
 # ── Graceful Ctrl+C handling ────────────────────────────────────────────────────
 [Console]::TreatControlCAsInput = $false
-$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+# Unregister any previous handler (prevents accumulation when dot-sourced)
+Get-EventSubscriber -SourceIdentifier 'SysInfoCLI.Exiting' -ErrorAction SilentlyContinue |
+    Unregister-Event -ErrorAction SilentlyContinue
+$script:ExitSubscription = Register-EngineEvent -SourceIdentifier 'SysInfoCLI.Exiting' -Action {
     [Console]::ResetColor()
 }
 
@@ -98,20 +116,7 @@ function Invoke-FullScan {
     Write-Host '  [*] Starting system information scan...' -ForegroundColor Cyan
     Write-Host ''
 
-    # Map of step numbers to their expected status messages from the core module
-    $stepLabels = @(
-        'Collecting system overview...'
-        'Collecting operating system info...'
-        'Collecting processor info...'
-        'Collecting memory info...'
-        'Collecting storage info...'
-        'Collecting graphics info...'
-        'Collecting network adapter info...'
-        'Collecting BIOS info...'
-        'Collecting motherboard info...'
-        'Collecting battery info...'
-        'Collecting hotfixes and startup programs...'
-    )
+    $stepLabels = $script:ScanStepLabels
     $totalSteps = $stepLabels.Count
 
     # Track which step we're on and which steps succeeded
@@ -134,19 +139,7 @@ function Invoke-FullScan {
     $progressCB = {
         param([int]$Pct, [string]$Msg)
 
-        $stepLabels = @(
-            'Collecting system overview...'
-            'Collecting operating system info...'
-            'Collecting processor info...'
-            'Collecting memory info...'
-            'Collecting storage info...'
-            'Collecting graphics info...'
-            'Collecting network adapter info...'
-            'Collecting BIOS info...'
-            'Collecting motherboard info...'
-            'Collecting battery info...'
-            'Collecting hotfixes and startup programs...'
-        )
+        $stepLabels = $script:ScanStepLabels
         $totalSteps = $stepLabels.Count
 
         # Find which step this message corresponds to
