@@ -35,7 +35,7 @@ Add-Type -AssemblyName System.Windows.Forms   # for FolderBrowserDialog
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Sysinfo Scraper v2.0 - GUI"
+    Title="SysInfo Scraper v2.0 - GUI"
     Width="1050" Height="720"
     MinWidth="900" MinHeight="650"
     WindowStartupLocation="CenterScreen"
@@ -157,7 +157,7 @@ Add-Type -AssemblyName System.Windows.Forms   # for FolderBrowserDialog
         <!-- Title bar area -->
         <Border Grid.Row="0" Background="#252525" Padding="16,10">
             <StackPanel>
-                <TextBlock Text="Sysinfo Scraper v2.0 - GUI"
+                <TextBlock Text="SysInfo Scraper v2.0 - GUI"
                            FontSize="20" FontWeight="Bold" FontFamily="Segoe UI"
                            Foreground="#E0E0E0"/>
                 <TextBlock Text="by @13X" FontSize="11" FontFamily="Segoe UI"

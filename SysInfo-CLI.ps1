@@ -345,7 +345,7 @@ function Show-About {
     Write-Host '  ╔══════════════════════════════════════════════╗' -ForegroundColor Cyan
     Write-Host '  ║              ABOUT THIS TOOL                ║' -ForegroundColor Cyan
     Write-Host '  ╠══════════════════════════════════════════════╣' -ForegroundColor Cyan
-    Write-Host '  ║  Sysinfo Scraper v2.0                      ║' -ForegroundColor Cyan
+    Write-Host '  ║  SysInfo Scraper v2.0                      ║' -ForegroundColor Cyan
     Write-Host '  ║  Author : @13X                             ║' -ForegroundColor Cyan
     Write-Host '  ║  License: See LICENSE file                 ║' -ForegroundColor Cyan
     Write-Host '  ╚══════════════════════════════════════════════╝' -ForegroundColor Cyan
@@ -431,7 +431,7 @@ while ($keepRunning) {
         }
         '5' {
             Write-Host ''
-            Write-Host '  Goodbye! Thanks for using Sysinfo Scraper.' -ForegroundColor Cyan
+            Write-Host '  Goodbye! Thanks for using SysInfo Scraper.' -ForegroundColor Cyan
             Write-Host ''
             $keepRunning = $false
         }
