@@ -29,6 +29,25 @@ Add-Type -AssemblyName System.Windows.Forms   # for FolderBrowserDialog
 # ── Dot-source the core module ─────────────────────────────────────────────────
 . "$PSScriptRoot\SysInfo-Core.ps1"
 
+# ── Initialise session log ─────────────────────────────────────────────────────
+$null = Initialize-SysInfoLog
+Write-SysInfoLog "SysInfo-GUI started (Admin: $($script:IsAdmin))" -Level INFO
+
+# ── Attempt UAC elevation ──────────────────────────────────────────────────────
+# Try to re-launch with administrator privileges. Request-AdminElevation calls
+# exit 0 on the current process if UAC is accepted; we only reach the code below
+# if the user declined or if UAC is blocked by policy.
+if (-not $script:IsAdmin) {
+    # PSCommandPath is the most reliable way to get the current script path;
+    # fall back to MyInvocation.MyCommand.Path if unavailable.
+    $elevScriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+    # Will exit this process if UAC is accepted; returns $false otherwise
+    $elevated = Request-AdminElevation -ScriptPath $elevScriptPath
+    if (-not $elevated) {
+        Write-SysInfoLog 'Admin elevation denied for GUI. Continuing as standard user.' -Level WARN
+    }
+}
+
 # ── XAML Definition ────────────────────────────────────────────────────────────
 
 [xml]$xaml = @"
@@ -157,10 +176,14 @@ Add-Type -AssemblyName System.Windows.Forms   # for FolderBrowserDialog
         <!-- Title bar area -->
         <Border Grid.Row="0" Background="#252525" Padding="16,10">
             <StackPanel>
-                <TextBlock Text="SysInfo Scraper v2.0 - GUI"
-                           FontSize="20" FontWeight="Bold" FontFamily="Segoe UI"
-                           Foreground="#E0E0E0"/>
-                <TextBlock Text="by @13X" FontSize="11" FontFamily="Segoe UI"
+                <DockPanel>
+                    <TextBlock Text="SysInfo Scraper v2.0 - GUI"
+                               FontSize="20" FontWeight="Bold" FontFamily="Segoe UI"
+                               Foreground="#E0E0E0"/>
+                    <TextBlock x:Name="AdminStatusBadge" Text="" FontSize="12" FontFamily="Segoe UI"
+                               FontWeight="SemiBold" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                </DockPanel>
+                <TextBlock x:Name="LogFilePath" Text="by @13X" FontSize="11" FontFamily="Segoe UI"
                            Foreground="#888888" Margin="0,2,0,0"/>
             </StackPanel>
         </Border>
@@ -482,6 +505,91 @@ Add-Type -AssemblyName System.Windows.Forms   # for FolderBrowserDialog
                     </ScrollViewer>
                 </TabItem>
 
+                <!-- Security tab -->
+                <TabItem Header="Security">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
+                        <StackPanel>
+                            <TextBlock Text="Protection Status" Foreground="#E0E0E0" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,6"/>
+                            <Grid Margin="0,0,0,12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="180"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Defender Real-Time:" Foreground="#AAAAAA" Margin="0,4"/>
+                                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="valDefenderRT" Text="Unknown" Foreground="#E0E0E0" Margin="8,4"/>
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="BitLocker Status:" Foreground="#AAAAAA" Margin="0,4"/>
+                                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="valBitLocker" Text="Unknown" Foreground="#E0E0E0" Margin="8,4"/>
+                            </Grid>
+                            <TextBlock Text="Antivirus Products" Foreground="#E0E0E0" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <DataGrid x:Name="gridAV" Height="120" Margin="0,0,0,12"/>
+                            <TextBlock Text="Firewall Products" Foreground="#E0E0E0" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <DataGrid x:Name="gridFirewall" Height="120"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- Environment tab -->
+                <TabItem Header="Environment">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="180"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Time Zone:" Foreground="#AAAAAA" Margin="0,4"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="valTimeZone" Text="Unknown" Foreground="#E0E0E0" Margin="8,4" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="UTC Offset:" Foreground="#AAAAAA" Margin="0,4"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="valUTCOffset" Text="Unknown" Foreground="#E0E0E0" Margin="8,4"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="System Locale:" Foreground="#AAAAAA" Margin="0,4"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" x:Name="valLocale" Text="Unknown" Foreground="#E0E0E0" Margin="8,4"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="System Language:" Foreground="#AAAAAA" Margin="0,4"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="valLanguage" Text="Unknown" Foreground="#E0E0E0" Margin="8,4" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="PowerShell Version:" Foreground="#AAAAAA" Margin="0,4"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" x:Name="valPSVersion" Text="Unknown" Foreground="#E0E0E0" Margin="8,4"/>
+                            <TextBlock Grid.Row="5" Grid.Column="0" Text="CLR Version:" Foreground="#AAAAAA" Margin="0,4"/>
+                            <TextBlock Grid.Row="5" Grid.Column="1" x:Name="valCLRVersion" Text="Unknown" Foreground="#E0E0E0" Margin="8,4"/>
+                            <TextBlock Grid.Row="6" Grid.Column="0" Text="Execution Policy:" Foreground="#AAAAAA" Margin="0,4"/>
+                            <TextBlock Grid.Row="6" Grid.Column="1" x:Name="valExecPolicy" Text="Unknown" Foreground="#E0E0E0" Margin="8,4"/>
+                            <TextBlock Grid.Row="7" Grid.Column="0" Text="Admin Privileges:" Foreground="#AAAAAA" Margin="0,4"/>
+                            <TextBlock Grid.Row="7" Grid.Column="1" x:Name="valAdminStatus" Text="Unknown" Foreground="#E0E0E0" Margin="8,4"/>
+                        </Grid>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- Hardware/Devices tab -->
+                <TabItem Header="Devices">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
+                        <StackPanel>
+                            <TextBlock Text="Display Monitors" Foreground="#E0E0E0" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <DataGrid x:Name="gridDisplays" Height="150" Margin="0,0,0,12"/>
+                            <TextBlock Text="Sound Devices" Foreground="#E0E0E0" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <DataGrid x:Name="gridSound" Height="150" Margin="0,0,0,12"/>
+                            <TextBlock Text="Printers" Foreground="#E0E0E0" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <DataGrid x:Name="gridPrinters" Height="150"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- Installed Software tab -->
+                <TabItem Header="Apps">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
+                        <StackPanel>
+                            <TextBlock Text="Installed Applications" Foreground="#E0E0E0" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <DataGrid x:Name="gridApps" Height="500"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
             </TabControl>
 
             <!-- Right panel: actions -->
@@ -594,7 +702,18 @@ $namedElements = @(
     'btnScan', 'btnBrowse', 'btnExport', 'btnConsole',
     'cmbFormat', 'txtOutputPath',
     # Status
-    'StatusText', 'ProgressBar'
+    'StatusText', 'ProgressBar',
+    # Title bar
+    'AdminStatusBadge', 'LogFilePath',
+    # Security tab
+    'valDefenderRT', 'valBitLocker', 'gridAV', 'gridFirewall',
+    # Environment tab
+    'valTimeZone', 'valUTCOffset', 'valLocale', 'valLanguage',
+    'valPSVersion', 'valCLRVersion', 'valExecPolicy', 'valAdminStatus',
+    # Devices tab
+    'gridDisplays', 'gridSound', 'gridPrinters',
+    # Apps tab
+    'gridApps'
 )
 
 foreach ($name in $namedElements) {
@@ -604,37 +723,116 @@ foreach ($name in $namedElements) {
 # Set default output path
 $ui['txtOutputPath'].Text = [Environment]::GetFolderPath('Desktop')
 
+# Set admin status badge in the title bar
+if ($script:IsAdmin) {
+    $ui['AdminStatusBadge'].Text       = '[ADMIN]'
+    $ui['AdminStatusBadge'].Foreground = [System.Windows.Media.Brushes]::LimeGreen
+} else {
+    $ui['AdminStatusBadge'].Text       = '[STANDARD USER]'
+    $ui['AdminStatusBadge'].Foreground = [System.Windows.Media.Brushes]::Orange
+}
+
+# Show log file path under the title
+if ($script:LogFile) {
+    $ui['LogFilePath'].Text = "by @13X  |  Log: $($script:LogFile)"
+}
+
 # ── State ──────────────────────────────────────────────────────────────────────
 
 $script:ScanData = $null
 
-# ── Helper: safe string conversion ─────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 function Get-SafeValue {
+    <#
+    .SYNOPSIS
+        Returns a safe string representation of a value with a fallback default.
+    .DESCRIPTION
+        Converts $Value to a string.  If the result is null or whitespace, returns
+        $Default instead.  Importantly, the 'Needs Admin Priv' sentinel is returned
+        as-is so that callers can detect and colour it separately.
+    .PARAMETER Value
+        The value to convert.
+    .PARAMETER Default
+        Fallback string when $Value is null or whitespace.  Defaults to 'Unknown'.
+    .OUTPUTS
+        [string]
+    #>
     param($Value, [string]$Default = 'Unknown')
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace("$Value")) { return $Default }
     return "$Value"
 }
 
+function Set-UIFieldValue {
+    <#
+    .SYNOPSIS
+        Sets a WPF TextBlock's text and foreground colour.
+    .DESCRIPTION
+        Calls Get-SafeValue to determine the display string, then sets the
+        TextBlock.Text property.  If the value equals the 'Needs Admin Priv'
+        sentinel the foreground is set to OrangeRed; otherwise it is set to
+        the standard data colour (#E0E0E0).
+    .PARAMETER Control
+        The WPF TextBlock control to update.
+    .PARAMETER Value
+        The raw value from scan data.
+    .PARAMETER Default
+        Fallback string when the value is null or whitespace.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        $Control,
+
+        $Value,
+
+        [string]$Default = 'Unknown'
+    )
+
+    $displayValue = Get-SafeValue $Value $Default
+    $Control.Text = $displayValue
+
+    if ($displayValue -eq $script:NeedsAdminPriv) {
+        $Control.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+    } else {
+        $Control.Foreground = [System.Windows.Media.SolidColorBrush]::new(
+            [System.Windows.Media.Color]::FromRgb(0xE0, 0xE0, 0xE0))
+    }
+}
+
 # ── Populate UI from scan data ─────────────────────────────────────────────────
 
 function Update-UIFromData {
-    param($Data)
+    <#
+    .SYNOPSIS
+        Populates all UI controls from a completed scan data object.
+    .DESCRIPTION
+        Iterates through all data categories returned by Get-SystemInfoData and
+        updates the corresponding WPF controls.  Uses Set-UIFieldValue for scalar
+        TextBlock controls so that values equal to the 'Needs Admin Priv' sentinel
+        are automatically coloured OrangeRed.  DataGrid controls are updated via
+        ItemsSource.
+    .PARAMETER Data
+        The PSCustomObject returned by Get-SystemInfoData.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        $Data
+    )
 
     $d = $Data
 
     # System overview
     $so = $d.SystemOverview
     if ($so) {
-        $ui['valComputerName'].Text = Get-SafeValue $so.ComputerName
-        $ui['valCurrentUser'].Text  = Get-SafeValue $so.CurrentUser
-        $ui['valDomain'].Text       = Get-SafeValue $so.Domain
-        $ui['valMake'].Text         = Get-SafeValue $so.SystemManufacturer
-        $ui['valModel'].Text        = Get-SafeValue $so.SystemModel
-        $ui['valSystemType'].Text   = Get-SafeValue $so.SystemType
-        $ui['valSerialNumber'].Text = Get-SafeValue $so.SerialNumber
-        $ui['valAssetTag'].Text     = Get-SafeValue $so.AssetTag
-        $ui['valChassisType'].Text  = Get-SafeValue $so.ChassisType
+        Set-UIFieldValue $ui['valComputerName'] $so.ComputerName
+        Set-UIFieldValue $ui['valCurrentUser']  $so.CurrentUser
+        Set-UIFieldValue $ui['valDomain']       $so.Domain
+        Set-UIFieldValue $ui['valMake']         $so.SystemManufacturer
+        Set-UIFieldValue $ui['valModel']        $so.SystemModel
+        Set-UIFieldValue $ui['valSystemType']   $so.SystemType
+        Set-UIFieldValue $ui['valSerialNumber'] $so.SerialNumber
+        Set-UIFieldValue $ui['valAssetTag']     $so.AssetTag
+        Set-UIFieldValue $ui['valChassisType']  $so.ChassisType
 
         $ui['MakeLabel'].Text  = "Make: $(Get-SafeValue $so.SystemManufacturer)"
         $ui['ModelLabel'].Text = "Model: $(Get-SafeValue $so.SystemModel)"
@@ -643,41 +841,41 @@ function Update-UIFromData {
     # OS
     $os = $d.OperatingSystem
     if ($os) {
-        $ui['valOSName'].Text      = Get-SafeValue $os.OSName
-        $ui['valOSVersion'].Text   = Get-SafeValue $os.OSVersion
-        $ui['valOSBuild'].Text     = Get-SafeValue $os.OSBuild
-        $ui['valOSArch'].Text      = Get-SafeValue $os.OSArchitecture
-        $ui['valInstallDate'].Text = Get-SafeValue $os.InstallDate
-        $ui['valLastBoot'].Text    = Get-SafeValue $os.LastBootTime
-        $ui['valUptime'].Text      = Get-SafeValue $os.Uptime
-        $ui['valRegOwner'].Text    = Get-SafeValue $os.RegisteredOwner
-        $ui['valProductID'].Text   = Get-SafeValue $os.ProductID
+        Set-UIFieldValue $ui['valOSName']      $os.OSName
+        Set-UIFieldValue $ui['valOSVersion']   $os.OSVersion
+        Set-UIFieldValue $ui['valOSBuild']     $os.OSBuild
+        Set-UIFieldValue $ui['valOSArch']      $os.OSArchitecture
+        Set-UIFieldValue $ui['valInstallDate'] $os.InstallDate
+        Set-UIFieldValue $ui['valLastBoot']    $os.LastBootTime
+        Set-UIFieldValue $ui['valUptime']      $os.Uptime
+        Set-UIFieldValue $ui['valRegOwner']    $os.RegisteredOwner
+        Set-UIFieldValue $ui['valProductID']   $os.ProductID
     }
 
     # Processor
     $cpu = $d.Processor
     if ($cpu) {
-        $ui['valCPUName'].Text   = Get-SafeValue $cpu.ProcessorName
-        $ui['valCPUMfg'].Text    = Get-SafeValue $cpu.Manufacturer
-        $ui['valCPUCores'].Text  = Get-SafeValue $cpu.NumberOfCores
-        $ui['valCPULP'].Text     = Get-SafeValue $cpu.NumberOfLogicalProcessors
-        $ui['valCPUMaxClk'].Text = Get-SafeValue $cpu.MaxClockSpeedMHz
-        $ui['valCPUCurClk'].Text = Get-SafeValue $cpu.CurrentClockSpeedMHz
-        $ui['valCPUArch'].Text   = Get-SafeValue $cpu.Architecture
-        $ui['valCPUL2'].Text     = Get-SafeValue $cpu.L2CacheSizeKB
-        $ui['valCPUL3'].Text     = Get-SafeValue $cpu.L3CacheSizeKB
-        $ui['valCPUSocket'].Text = Get-SafeValue $cpu.SocketDesignation
+        Set-UIFieldValue $ui['valCPUName']   $cpu.ProcessorName
+        Set-UIFieldValue $ui['valCPUMfg']    $cpu.Manufacturer
+        Set-UIFieldValue $ui['valCPUCores']  $cpu.NumberOfCores
+        Set-UIFieldValue $ui['valCPULP']     $cpu.NumberOfLogicalProcessors
+        Set-UIFieldValue $ui['valCPUMaxClk'] $cpu.MaxClockSpeedMHz
+        Set-UIFieldValue $ui['valCPUCurClk'] $cpu.CurrentClockSpeedMHz
+        Set-UIFieldValue $ui['valCPUArch']   $cpu.Architecture
+        Set-UIFieldValue $ui['valCPUL2']     $cpu.L2CacheSizeKB
+        Set-UIFieldValue $ui['valCPUL3']     $cpu.L3CacheSizeKB
+        Set-UIFieldValue $ui['valCPUSocket'] $cpu.SocketDesignation
     }
 
     # Memory
     $mem = $d.Memory
     if ($mem) {
-        $ui['valMemTotal'].Text     = Get-SafeValue $mem.TotalPhysicalMemoryGB
-        $ui['valMemAvail'].Text     = Get-SafeValue $mem.AvailableMemoryGB
-        $ui['valMemUsed'].Text      = Get-SafeValue $mem.UsedMemoryGB
-        $ui['valMemPct'].Text       = Get-SafeValue $mem.MemoryUsagePercent
-        $ui['valMemSlots'].Text     = Get-SafeValue $mem.TotalSlots
-        $ui['valMemUsedSlots'].Text = Get-SafeValue $mem.UsedSlots
+        Set-UIFieldValue $ui['valMemTotal']     $mem.TotalPhysicalMemoryGB
+        Set-UIFieldValue $ui['valMemAvail']     $mem.AvailableMemoryGB
+        Set-UIFieldValue $ui['valMemUsed']      $mem.UsedMemoryGB
+        Set-UIFieldValue $ui['valMemPct']       $mem.MemoryUsagePercent
+        Set-UIFieldValue $ui['valMemSlots']     $mem.TotalSlots
+        Set-UIFieldValue $ui['valMemUsedSlots'] $mem.UsedSlots
         if ($mem.DIMMs) {
             $ui['gridDIMMs'].ItemsSource = [System.Collections.ArrayList]@($mem.DIMMs)
         }
@@ -705,19 +903,19 @@ function Update-UIFromData {
     # BIOS
     $bios = $d.BIOS
     if ($bios) {
-        $ui['valBIOSMfg'].Text  = Get-SafeValue $bios.BIOSManufacturer
-        $ui['valBIOSVer'].Text  = Get-SafeValue $bios.BIOSVersion
-        $ui['valBIOSDate'].Text = Get-SafeValue $bios.BIOSDate
-        $ui['valSMBIOS'].Text   = Get-SafeValue $bios.SMBIOSVersion
+        Set-UIFieldValue $ui['valBIOSMfg']  $bios.BIOSManufacturer
+        Set-UIFieldValue $ui['valBIOSVer']  $bios.BIOSVersion
+        Set-UIFieldValue $ui['valBIOSDate'] $bios.BIOSDate
+        Set-UIFieldValue $ui['valSMBIOS']   $bios.SMBIOSVersion
     }
 
     # Motherboard
     $mb = $d.Motherboard
     if ($mb) {
-        $ui['valMBMfg'].Text     = Get-SafeValue $mb.Manufacturer
-        $ui['valMBProduct'].Text = Get-SafeValue $mb.Product
-        $ui['valMBVersion'].Text = Get-SafeValue $mb.Version
-        $ui['valMBSerial'].Text  = Get-SafeValue $mb.SerialNumber
+        Set-UIFieldValue $ui['valMBMfg']     $mb.Manufacturer
+        Set-UIFieldValue $ui['valMBProduct'] $mb.Product
+        Set-UIFieldValue $ui['valMBVersion'] $mb.Version
+        Set-UIFieldValue $ui['valMBSerial']  $mb.SerialNumber
     }
 
     # Battery
@@ -726,12 +924,12 @@ function Update-UIFromData {
         if ($bat.HasBattery) {
             $ui['NoBatteryText'].Visibility = 'Collapsed'
             $ui['BatteryGrid'].Visibility   = 'Visible'
-            $ui['valBatStatus'].Text      = Get-SafeValue $bat.Status
-            $ui['valBatCharge'].Text       = Get-SafeValue $bat.ChargePercent
-            $ui['valBatRuntime'].Text      = Get-SafeValue $bat.EstimatedRuntime
-            $ui['valBatDesign'].Text       = Get-SafeValue $bat.DesignCapacity
-            $ui['valBatFullCharge'].Text   = Get-SafeValue $bat.FullChargeCapacity
-            $ui['valBatHealth'].Text       = Get-SafeValue $bat.BatteryHealth
+            Set-UIFieldValue $ui['valBatStatus']     $bat.Status
+            Set-UIFieldValue $ui['valBatCharge']     $bat.ChargePercent
+            Set-UIFieldValue $ui['valBatRuntime']    $bat.EstimatedRuntime
+            Set-UIFieldValue $ui['valBatDesign']     $bat.DesignCapacity
+            Set-UIFieldValue $ui['valBatFullCharge'] $bat.FullChargeCapacity
+            Set-UIFieldValue $ui['valBatHealth']     $bat.BatteryHealth
         }
         else {
             $ui['NoBatteryText'].Visibility = 'Visible'
@@ -742,6 +940,42 @@ function Update-UIFromData {
     # Hotfixes & Startup
     if ($d.Hotfixes)        { $ui['gridHotfixes'].ItemsSource = [System.Collections.ArrayList]@($d.Hotfixes) }
     if ($d.StartupPrograms) { $ui['gridStartup'].ItemsSource  = [System.Collections.ArrayList]@($d.StartupPrograms) }
+
+    # Security
+    $sec = $d.Security
+    if ($sec -and -not $sec.Error) {
+        Set-UIFieldValue $ui['valDefenderRT'] $sec.DefenderRealTime
+        Set-UIFieldValue $ui['valBitLocker']  $sec.BitLockerStatus
+        if ($sec.AntiVirusProducts) { $ui['gridAV'].ItemsSource       = [System.Collections.ArrayList]@($sec.AntiVirusProducts) }
+        if ($sec.FirewallProducts)  { $ui['gridFirewall'].ItemsSource  = [System.Collections.ArrayList]@($sec.FirewallProducts) }
+    }
+
+    # Environment
+    $env2 = $d.Environment
+    if ($env2 -and -not $env2.Error) {
+        Set-UIFieldValue $ui['valTimeZone']  $env2.TimeZone
+        Set-UIFieldValue $ui['valUTCOffset'] $env2.UTCOffset
+        Set-UIFieldValue $ui['valLocale']    $env2.SystemLocale
+        Set-UIFieldValue $ui['valLanguage']  $env2.SystemLanguage
+        Set-UIFieldValue $ui['valPSVersion'] $env2.PowerShellVersion
+        Set-UIFieldValue $ui['valCLRVersion'] $env2.CLRVersion
+        Set-UIFieldValue $ui['valExecPolicy'] $env2.ExecutionPolicy
+    }
+    # Admin status always shown regardless of scan
+    $ui['valAdminStatus'].Text = if ($script:IsAdmin) { 'Administrator' } else { 'Standard User' }
+    $ui['valAdminStatus'].Foreground = if ($script:IsAdmin) {
+        [System.Windows.Media.Brushes]::LimeGreen
+    } else {
+        [System.Windows.Media.Brushes]::Orange
+    }
+
+    # Devices (Displays, Sound, Printers)
+    if ($d.Displays)     { $ui['gridDisplays'].ItemsSource = [System.Collections.ArrayList]@($d.Displays) }
+    if ($d.SoundDevices) { $ui['gridSound'].ItemsSource    = [System.Collections.ArrayList]@($d.SoundDevices) }
+    if ($d.Printers)     { $ui['gridPrinters'].ItemsSource = [System.Collections.ArrayList]@($d.Printers) }
+
+    # Installed Applications
+    if ($d.InstalledSoftware) { $ui['gridApps'].ItemsSource = [System.Collections.ArrayList]@($d.InstalledSoftware) }
 
     # Hardware image
     try {
@@ -756,25 +990,29 @@ function Update-UIFromData {
                 $bitmap.UriSource = [Uri]::new($imgPath)
                 $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
                 $bitmap.EndInit()
-                $ui['HardwareImage'].Source     = $bitmap
-                $ui['HardwareImage'].Visibility = 'Visible'
+                $ui['HardwareImage'].Source        = $bitmap
+                $ui['HardwareImage'].Visibility    = 'Visible'
                 $ui['ImagePlaceholder'].Visibility = 'Collapsed'
             }
         }
     }
     catch {
+        Write-SysInfoLog "Hardware image load failed: $($_.Exception.Message)" -Level WARN
         # Keep placeholder visible on error
     }
 }
 
 # ── Run Scan (background runspace + DispatcherTimer) ───────────────────────────
+# The scan is run in a background runspace so the UI stays responsive.
+# A DispatcherTimer polls the shared sync hashtable every 200 ms for progress
+# and completion, then updates the UI on the main dispatcher thread.
 
 $ui['btnScan'].Add_Click({
     $ui['btnScan'].IsEnabled = $false
     $ui['StatusText'].Text   = 'Scanning...'
     $ui['ProgressBar'].Value = 0
 
-    $dispatcher = $window.Dispatcher
+    Write-SysInfoLog 'GUI scan initiated.' -Level INFO
 
     # Shared synchronized hashtable for cross-thread communication
     $syncHash = [hashtable]::Synchronized(@{
@@ -783,9 +1021,10 @@ $ui['btnScan'].Add_Click({
         Error     = $null
         Progress  = 0
         Status    = 'Starting scan...'
+        IsAdmin   = $script:IsAdmin
     })
 
-    # Background runspace
+    # Background runspace – must dot-source Core so Get-SystemInfoData is available
     $runspace = [RunspaceFactory]::CreateRunspace()
     $runspace.ApartmentState = 'STA'
     $runspace.Open()
@@ -796,11 +1035,16 @@ $ui['btnScan'].Add_Click({
     [void]$psCmd.AddScript({
         param($SyncHash, $ScriptRoot)
 
-        # Dot-source the core module inside the runspace
+        # Dot-source the core module inside the runspace; this also sets $script:IsAdmin
         . "$ScriptRoot\SysInfo-Core.ps1"
 
+        # Override IsAdmin with the value passed from the main thread. Each runspace
+        # has its own independent session state so script-scoped variables are not
+        # automatically shared between runspaces – we must pass them explicitly.
+        $script:IsAdmin = $SyncHash.IsAdmin
+
         try {
-            $data = Get-SystemInfoData -ProgressCallback {
+            $data = Get-SystemInfoData -IsAdmin $SyncHash.IsAdmin -ProgressCallback {
                 param([int]$Pct, [string]$Msg)
                 $SyncHash.Progress = $Pct
                 $SyncHash.Status   = $Msg
@@ -833,6 +1077,7 @@ $ui['btnScan'].Add_Click({
             if ($syncHash.Error) {
                 $ui['StatusText'].Text   = "Scan failed: $($syncHash.Error)"
                 $ui['ProgressBar'].Value = 0
+                Write-SysInfoLog "GUI scan failed: $($syncHash.Error)" -Level ERROR
             }
             else {
                 $script:ScanData = $syncHash.Result
@@ -840,9 +1085,11 @@ $ui['btnScan'].Add_Click({
 
                 # Count successfully collected categories
                 $categories = @(
-                    'SystemOverview','OperatingSystem','Processor','Memory',
-                    'Storage','Graphics','NetworkAdapters','BIOS',
-                    'Motherboard','Battery','Hotfixes','StartupPrograms'
+                    'SystemOverview', 'OperatingSystem', 'Processor', 'Memory',
+                    'Storage', 'Graphics', 'NetworkAdapters', 'BIOS',
+                    'Motherboard', 'Battery', 'Hotfixes', 'StartupPrograms',
+                    'Security', 'Environment', 'Displays', 'InstalledSoftware',
+                    'SoundDevices', 'Printers'
                 )
                 $collected = 0
                 foreach ($cat in $categories) {
@@ -853,14 +1100,15 @@ $ui['btnScan'].Add_Click({
                         if (-not $hasError) { $collected++ }
                     }
                 }
-                $ui['StatusText'].Text   = "Scan complete - $collected of $($categories.Count) categories collected"
+                $ui['StatusText'].Text   = "Scan complete – $collected of $($categories.Count) categories collected"
                 $ui['ProgressBar'].Value = 100
+                Write-SysInfoLog "GUI scan complete: $collected/$($categories.Count) categories." -Level INFO
             }
 
             $ui['btnScan'].IsEnabled = $true
 
-            # Cleanup
-            try { $psCmd.Dispose() } catch {}
+            # Cleanup runspace resources
+            try { $psCmd.Dispose()  } catch {}
             try { $runspace.Dispose() } catch {}
         }
     }.GetNewClosure())
@@ -911,12 +1159,14 @@ $ui['btnExport'].Add_Click({
             $txtPath = Join-Path $outDir "SysInfo_${computerName}_${timestamp}.txt"
             Export-SystemInfoTXT -Data $script:ScanData -Path $txtPath
             $exported += $txtPath
+            Write-SysInfoLog "GUI: TXT exported to $txtPath" -Level INFO
         }
 
         if ($format -eq 'CSV' -or $format -eq 'Both') {
             $csvPath = Join-Path $outDir "SysInfo_${computerName}_${timestamp}.csv"
             Export-SystemInfoCSV -Data $script:ScanData -Path $csvPath
             $exported += $csvPath
+            Write-SysInfoLog "GUI: CSV exported to $csvPath" -Level INFO
         }
 
         $fileList = ($exported | ForEach-Object { "  - $_" }) -join "`n"
@@ -926,6 +1176,7 @@ $ui['btnExport'].Add_Click({
         $ui['StatusText'].Text = "Exported to $outDir"
     }
     catch {
+        Write-SysInfoLog "GUI: export failed: $($_.Exception.Message)" -Level ERROR
         [System.Windows.MessageBox]::Show(
             "Export failed:`n$($_.Exception.Message)",
             'Export Error', 'OK', 'Error')
@@ -971,5 +1222,8 @@ $ui['btnConsole'].Add_Click({
 })
 
 # ── Show Window ────────────────────────────────────────────────────────────────
+# This is a blocking call – execution continues only after the window is closed.
 
+Write-SysInfoLog 'GUI window displaying.' -Level INFO
 $window.ShowDialog() | Out-Null
+Write-SysInfoLog 'GUI window closed. Session ended.' -Level INFO

@@ -24,7 +24,14 @@
 
 # ── Admin privilege detection ──────────────────────────────────────────────────
 # Evaluated once when the module is dot-sourced by CLI or GUI front-ends.
-$script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# Wrapped in try/catch in case the WindowsPrincipal API is unavailable
+# (e.g. on non-Windows platforms or restricted environments).
+try {
+    $script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+catch {
+    $script:IsAdmin = $false
+}
 
 # Sentinel value shown (in red in CLI/GUI) when a value cannot be read without
 # elevated administrator privileges.
@@ -379,26 +386,32 @@ function Initialize-SysInfoLog {
     [CmdletBinding()]
     param()
 
-    $logDir = Join-Path $env:TEMP 'SysInfoScraper'
+    # Determine log directory – fall back to system temp or script root if $env:TEMP is unavailable
+    $tempRoot = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { $PSScriptRoot }
+    $logDir = Join-Path $tempRoot 'SysInfoScraper'
     if (-not (Test-Path $logDir)) {
         try {
             $null = New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop
         }
         catch {
-            # Cannot create log directory; log to temp root as fallback
-            $logDir = $env:TEMP
+            # Cannot create log directory; log directly in temp root as fallback
+            $logDir = $tempRoot
         }
     }
 
     $timestamp      = Get-Date -Format 'yyyyMMdd_HHmmss'
     $script:LogFile = Join-Path $logDir "SysInfo_${timestamp}.log"
 
+    # Resolve current user name – WindowsIdentity.GetCurrent() is Windows-only
+    $currentUser = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name }
+                   catch { "$env:USERNAME" }
+
     $header = @(
         '=' * 70
         '  SysInfo Scraper - Session Log'
         "  Started : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
         "  Computer: $env:COMPUTERNAME"
-        "  User    : $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+        "  User    : $currentUser"
         "  Admin   : $($script:IsAdmin)"
         "  PS Ver  : $($PSVersionTable.PSVersion)"
         '=' * 70
@@ -465,7 +478,13 @@ function Test-IsAdministrator {
     [OutputType([bool])]
     param()
 
-    return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    try {
+        return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        # WindowsPrincipal is not available on non-Windows platforms; default to $false
+        return $false
+    }
 }
 
 function Request-AdminElevation {
@@ -496,7 +515,6 @@ function Request-AdminElevation {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter(Mandatory)]
         [string]$ScriptPath,
 
         [string[]]$OriginalArgs = @()
@@ -506,6 +524,18 @@ function Request-AdminElevation {
     if (Test-IsAdministrator) {
         Write-SysInfoLog 'Process is already running with administrator privileges.' -Level INFO
         return $true
+    }
+
+    # Guard: cannot elevate without a script path
+    if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
+        Write-SysInfoLog 'Request-AdminElevation: ScriptPath is empty; cannot re-launch for elevation.' -Level WARN
+        return $false
+    }
+
+    # Guard: script file must exist
+    if (-not (Test-Path $ScriptPath)) {
+        Write-SysInfoLog "Request-AdminElevation: ScriptPath '$ScriptPath' does not exist; cannot elevate." -Level WARN
+        return $false
     }
 
     Write-SysInfoLog "Requesting UAC elevation for: $ScriptPath" -Level INFO
@@ -988,19 +1018,20 @@ function Get-SystemInfoData {
     & $reportProgress 'Collecting security info...'
     try {
         # Antivirus products (via Windows Security Center)
+        # productState encoding (simplified): mask 0x1000 = product enabled;
+        # mask 0x0010 = signatures out of date (0 = current, non-zero = outdated).
         $avProducts = @()
         try {
             $avRaw = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction Stop)
             foreach ($av in $avRaw) {
-                # productState bit 4096 = enabled, bit 16 = up to date (simplified decode)
-                $stateHex  = '{0:X}' -f $av.productState
-                $enabled   = ($av.productState -band 0x1000) -ne 0
-                $upToDate  = ($av.productState -band 0x0010) -eq 0
+                $stateHex = '{0:X}' -f $av.productState
+                $enabled  = ($av.productState -band 0x1000) -ne 0
+                $upToDate = ($av.productState -band 0x0010) -eq 0
                 $avProducts += [PSCustomObject]@{
-                    Name       = $av.displayName
-                    Enabled    = $enabled
-                    UpToDate   = $upToDate
-                    StateCode  = $stateHex
+                    Name      = $av.displayName
+                    Enabled   = $enabled
+                    UpToDate  = $upToDate
+                    StateCode = $stateHex
                 }
             }
         }
@@ -1034,25 +1065,26 @@ function Get-SystemInfoData {
             $defenderRealTime = 'Unknown'
         }
 
-        # BitLocker status (admin required for full details)
-        $bitLockerStatus = if ($IsAdmin) {
+        # BitLocker status (requires admin for full details)
+        $bitLockerStatus = 'Unknown'
+        if ($IsAdmin) {
             try {
                 $bl = Get-BitLockerVolume -ErrorAction Stop | Select-Object -First 1
-                if ($bl) { "$($bl.VolumeStatus) ($($bl.ProtectionStatus))" } else { 'Not configured' }
+                $bitLockerStatus = if ($bl) { "$($bl.VolumeStatus) ($($bl.ProtectionStatus))" } else { 'Not configured' }
             }
             catch {
                 try {
-                    # Fallback: check via manage-bde
+                    # Fallback: query via manage-bde command line tool
                     $bdOut = & manage-bde -status C: 2>&1
-                    if ($bdOut -match 'Protection On') { 'Protection On' }
-                    elseif ($bdOut -match 'Protection Off') { 'Protection Off' }
-                    else { 'Unknown' }
+                    if ($bdOut -match 'Protection On')  { $bitLockerStatus = 'Protection On' }
+                    elseif ($bdOut -match 'Protection Off') { $bitLockerStatus = 'Protection Off' }
+                    else { $bitLockerStatus = 'Unknown' }
                 }
-                catch { 'Unknown' }
+                catch { $bitLockerStatus = 'Unknown' }
             }
         }
         else {
-            $script:NeedsAdminPriv
+            $bitLockerStatus = $script:NeedsAdminPriv
         }
 
         $info['Security'] = [PSCustomObject]@{
