@@ -50,10 +50,43 @@ param(
 # ── Dot-source the core module ──────────────────────────────────────────────────
 . "$PSScriptRoot\SysInfo-Core.ps1"
 
+# ── Initialise session log ─────────────────────────────────────────────────────
+$null = Initialize-SysInfoLog
+Write-SysInfoLog "SysInfo-CLI started (Admin: $($script:IsAdmin))" -Level INFO
+
+# ── Attempt UAC elevation ──────────────────────────────────────────────────────
+# Try to re-launch with administrator privileges. Request-AdminElevation calls
+# exit 0 on the current process if UAC is accepted; we only reach the code below
+# if the user declined or if UAC is blocked by policy.
+if (-not $script:IsAdmin) {
+    Write-Host ''
+    Write-Host '  [*] Requesting administrator privileges via UAC...' -ForegroundColor Cyan
+    # Reconstruct any non-default parameters to forward to the elevated instance
+    $fwdArgs = @()
+    if ($ScanAndExport)                              { $fwdArgs += '-ScanAndExport' }
+    if ($OutputFormat -and $OutputFormat -ne 'Both') { $fwdArgs += "-OutputFormat `"$OutputFormat`"" }
+    if ($OutputPath   -and $OutputPath   -ne '.')    { $fwdArgs += "-OutputPath `"$OutputPath`"" }
+    # PSCommandPath is the most reliable way to get the current script path;
+    # fall back to MyInvocation.MyCommand.Path if unavailable.
+    $elevScriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+    # Will exit this process if UAC is accepted; returns $false otherwise
+    $elevated = Request-AdminElevation -ScriptPath $elevScriptPath `
+                                       -OriginalArgs $fwdArgs
+    if (-not $elevated) {
+        Write-Host "  [!] Elevation declined or unavailable – continuing as standard user." -ForegroundColor Yellow
+        Write-Host '      Items requiring admin rights will be shown in ' -ForegroundColor Yellow -NoNewline
+        Write-Host 'red' -ForegroundColor Red -NoNewline
+        Write-Host " as: $($script:NeedsAdminPriv)" -ForegroundColor Yellow
+        Write-Host ''
+        Write-SysInfoLog 'Admin elevation denied. Continuing as standard user.' -Level WARN
+    }
+}
+
 # ── Script-level state ──────────────────────────────────────────────────────────
 $script:ScanData = $null
 
-# Step labels used during scanning – single source of truth
+# Step labels used during scanning – single source of truth (must match the
+# progress messages emitted by Get-SystemInfoData in SysInfo-Core.ps1).
 $script:ScanStepLabels = @(
     'Collecting system overview...'
     'Collecting operating system info...'
@@ -66,6 +99,12 @@ $script:ScanStepLabels = @(
     'Collecting motherboard info...'
     'Collecting battery info...'
     'Collecting hotfixes and startup programs...'
+    'Collecting security info...'
+    'Collecting environment info...'
+    'Collecting display info...'
+    'Collecting installed software...'
+    'Collecting sound device info...'
+    'Collecting printer info...'
 )
 
 # ── Graceful Ctrl+C handling ────────────────────────────────────────────────────
@@ -79,6 +118,18 @@ $script:ExitSubscription = Register-EngineEvent -SourceIdentifier 'SysInfoCLI.Ex
 
 # ── Helper: write a horizontal rule ────────────────────────────────────────────
 function Write-Banner {
+    <#
+    .SYNOPSIS
+        Displays the application banner with admin status indicator.
+    .DESCRIPTION
+        Writes a styled box banner to the console, including the tool name,
+        author, and whether the current session is running with administrator
+        privileges.  If running as admin, a green [ADMIN] badge is shown;
+        otherwise a yellow [STANDARD USER] badge is displayed together with a
+        reminder that some values will show 'Needs Admin Priv'.
+    #>
+    $adminLabel = if ($script:IsAdmin) { '[ADMIN]' } else { '[STANDARD USER]' }
+    $adminColor = if ($script:IsAdmin) { 'Green'  } else { 'Yellow'           }
     $banner = @(
         ''
         '  ╔══════════════════════════════════════════════╗'
@@ -90,15 +141,38 @@ function Write-Banner {
     foreach ($line in $banner) {
         Write-Host $line -ForegroundColor Cyan
     }
+    Write-Host "  Privilege level: " -ForegroundColor DarkGray -NoNewline
+    Write-Host $adminLabel -ForegroundColor $adminColor
+    if ($script:LogFile) {
+        Write-Host "  Log file       : $($script:LogFile)" -ForegroundColor DarkGray
+    }
+    Write-Host ''
 }
 
 function Write-Separator {
+    <#
+    .SYNOPSIS
+        Writes a horizontal divider line to the console.
+    #>
     Write-Host ('  ' + ('─' * 46)) -ForegroundColor DarkGray
 }
 
 # ── Helper: generate timestamped filename ──────────────────────────────────────
 function Get-ExportFileName {
+    <#
+    .SYNOPSIS
+        Generates a timestamped export filename for scan results.
+    .DESCRIPTION
+        Combines the scanned computer name (or the current $env:COMPUTERNAME if
+        no scan has been performed) with a yyyyMMdd_HHmmss timestamp and the
+        supplied file extension.
+    .PARAMETER Extension
+        File extension without the leading dot (e.g. 'txt' or 'csv').
+    .OUTPUTS
+        [string] Filename in the form SysInfo_<ComputerName>_<Timestamp>.<Ext>.
+    #>
     param(
+        [Parameter(Mandatory)]
         [string]$Extension
     )
     $computer = if ($script:ScanData -and $script:ScanData.SystemOverview.ComputerName) {
@@ -110,10 +184,54 @@ function Get-ExportFileName {
     return "SysInfo_${computer}_${ts}.${Extension}"
 }
 
+# ── Helper: write formatted table with 'Needs Admin Priv' lines coloured red ───
+function Write-ColoredTable {
+    <#
+    .SYNOPSIS
+        Writes a pre-formatted table string to the console, colouring any line
+        that contains the 'Needs Admin Priv' sentinel in red.
+    .DESCRIPTION
+        Format-SystemInfoTable returns a plain multi-line string.  This wrapper
+        splits the string on newlines and writes each line individually, using
+        Write-Host -ForegroundColor Red for lines that contain the sentinel value
+        so that missing-privilege entries are visually distinct from normal data.
+    .PARAMETER TableText
+        The multi-line string produced by Format-SystemInfoTable.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$TableText
+    )
+    $sentinel = $script:NeedsAdminPriv
+    foreach ($line in $TableText -split "`n") {
+        if ($line -match [regex]::Escape($sentinel)) {
+            Write-Host $line -ForegroundColor Red
+        } else {
+            Write-Host $line
+        }
+    }
+}
+
 # ── 1. Run Full System Scan ────────────────────────────────────────────────────
 function Invoke-FullScan {
+    <#
+    .SYNOPSIS
+        Runs a full system information scan and displays the results.
+    .DESCRIPTION
+        Invokes Get-SystemInfoData (from SysInfo-Core.ps1) with a progress
+        callback that updates a live step-by-step status display.  After the scan
+        completes, the results are formatted and printed to the console.  Values
+        that could not be retrieved due to insufficient privileges are highlighted
+        in red with the text 'Needs Admin Priv'.  The user is then offered the
+        option to export the results.
+    #>
     Write-Host ''
     Write-Host '  [*] Starting system information scan...' -ForegroundColor Cyan
+    if (-not $script:IsAdmin) {
+        Write-Host "  [!] Running as standard user – some values will show '" -ForegroundColor Yellow -NoNewline
+        Write-Host $script:NeedsAdminPriv -ForegroundColor Red -NoNewline
+        Write-Host "'." -ForegroundColor Yellow
+    }
     Write-Host ''
 
     $stepLabels = $script:ScanStepLabels
@@ -176,8 +294,10 @@ function Invoke-FullScan {
     $scanError = $null
     try {
         $script:ScanData = Get-SystemInfoData -ProgressCallback $progressCB -ErrorAction Stop
+        Write-SysInfoLog 'Full scan completed successfully.' -Level INFO
     } catch {
         $scanError = $_
+        Write-SysInfoLog "Full scan failed: $($_.Exception.Message)" -Level ERROR
     }
 
     # Mark the last step
@@ -203,9 +323,11 @@ function Invoke-FullScan {
         $categories = @(
             'SystemOverview', 'OperatingSystem', 'Processor', 'Memory',
             'Storage', 'Graphics', 'NetworkAdapters', 'BIOS',
-            'Motherboard', 'Battery', 'Hotfixes', 'StartupPrograms'
+            'Motherboard', 'Battery', 'Hotfixes', 'StartupPrograms',
+            'Security', 'Environment', 'Displays', 'InstalledSoftware',
+            'SoundDevices', 'Printers'
         )
-        # Count categories that exist and have no Error property (or the Error property is empty)
+        # Count categories that exist and have no Error property (or Error is empty)
         $successCount = 0
         foreach ($cat in $categories) {
             $val = $script:ScanData.PSObject.Properties[$cat]
@@ -226,10 +348,10 @@ function Invoke-FullScan {
         return
     }
 
-    # Display formatted table
+    # Display formatted table – lines containing the admin sentinel are shown in red
     Write-Host ''
     $tableOutput = Format-SystemInfoTable -Data $script:ScanData
-    Write-Host $tableOutput
+    Write-ColoredTable -TableText $tableOutput
 
     # Prompt to export
     Write-Host ''
@@ -242,6 +364,14 @@ function Invoke-FullScan {
 
 # ── 2. Export Options ──────────────────────────────────────────────────────────
 function Invoke-ExportMenu {
+    <#
+    .SYNOPSIS
+        Presents the interactive export format and path selection menu.
+    .DESCRIPTION
+        Prompts the user to choose an export format (TXT, CSV, or Both) and an
+        output directory, then delegates to Export-ScanResults.  If no scan data
+        is available the user is informed and returned to the main menu.
+    #>
     if (-not $script:ScanData) {
         Write-Host ''
         Write-Host '  [!] No scan data available. Please run a full scan first (Option 1).' -ForegroundColor Yellow
@@ -288,8 +418,25 @@ function Invoke-ExportMenu {
 }
 
 function Export-ScanResults {
+    <#
+    .SYNOPSIS
+        Exports the current scan data to TXT, CSV, or both file formats.
+    .DESCRIPTION
+        Calls Export-SystemInfoTXT and/or Export-SystemInfoCSV (from SysInfo-Core.ps1)
+        with auto-generated timestamped filenames in the specified output directory.
+        Each export attempt is individually wrapped in try/catch so a failure in one
+        format does not prevent the other from completing.
+    .PARAMETER Format
+        One of 'TXT', 'CSV', or 'Both'.
+    .PARAMETER Directory
+        Full path to the output directory.  Must already exist.
+    #>
     param(
+        [Parameter(Mandatory)]
+        [ValidateSet('TXT', 'CSV', 'Both')]
         [string]$Format,
+
+        [Parameter(Mandatory)]
         [string]$Directory
     )
 
@@ -300,8 +447,10 @@ function Export-ScanResults {
         try {
             Export-SystemInfoTXT -Data $script:ScanData -Path $txtFile
             Write-Host "  [+] TXT exported: $txtFile" -ForegroundColor Green
+            Write-SysInfoLog "TXT exported to: $txtFile" -Level INFO
         } catch {
             Write-Host "  [!] TXT export failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-SysInfoLog "TXT export failed: $($_.Exception.Message)" -Level ERROR
         }
     }
 
@@ -310,8 +459,10 @@ function Export-ScanResults {
         try {
             Export-SystemInfoCSV -Data $script:ScanData -Path $csvFile
             Write-Host "  [+] CSV exported: $csvFile" -ForegroundColor Green
+            Write-SysInfoLog "CSV exported to: $csvFile" -Level INFO
         } catch {
             Write-Host "  [!] CSV export failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-SysInfoLog "CSV export failed: $($_.Exception.Message)" -Level ERROR
         }
     }
 
@@ -322,6 +473,15 @@ function Export-ScanResults {
 
 # ── 3. View Last Scan Results ──────────────────────────────────────────────────
 function Show-LastScanResults {
+    <#
+    .SYNOPSIS
+        Displays the formatted results from the most recent scan.
+    .DESCRIPTION
+        Re-renders the formatted table from the cached scan data ($script:ScanData).
+        Lines containing the 'Needs Admin Priv' sentinel are printed in red.
+        If no scan has been performed the user is informed and returned to the
+        main menu.
+    #>
     if (-not $script:ScanData) {
         Write-Host ''
         Write-Host '  [!] No scan data available. Please run a full scan first (Option 1).' -ForegroundColor Yellow
@@ -333,7 +493,7 @@ function Show-LastScanResults {
 
     Write-Host ''
     $tableOutput = Format-SystemInfoTable -Data $script:ScanData
-    Write-Host $tableOutput
+    Write-ColoredTable -TableText $tableOutput
     Write-Host ''
     Write-Host '  Press Enter to return to the main menu...' -ForegroundColor DarkGray -NoNewline
     $null = Read-Host
@@ -341,6 +501,14 @@ function Show-LastScanResults {
 
 # ── 4. About ───────────────────────────────────────────────────────────────────
 function Show-About {
+    <#
+    .SYNOPSIS
+        Displays the About screen with tool information and admin status.
+    .DESCRIPTION
+        Shows version, author, license, and a brief description of the tool.
+        Also displays the current admin privilege level and the path to the
+        active session log file so users can find it for troubleshooting.
+    #>
     Write-Host ''
     Write-Host '  ╔══════════════════════════════════════════════╗' -ForegroundColor Cyan
     Write-Host '  ║              ABOUT THIS TOOL                ║' -ForegroundColor Cyan
@@ -351,13 +519,21 @@ function Show-About {
     Write-Host '  ╚══════════════════════════════════════════════╝' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '  A comprehensive system-information collection tool' -ForegroundColor White
-    Write-Host '  built in PowerShell.  Collects hardware, OS, network,' -ForegroundColor White
-    Write-Host '  and software data across 11 categories.' -ForegroundColor White
+    Write-Host "  built in PowerShell.  Collects hardware, OS, network," -ForegroundColor White
+    Write-Host "  and software data across $($script:ScanStepLabels.Count) categories." -ForegroundColor White
     Write-Host ''
     Write-Host '  This project replaces the original "Scrape Info.bat"' -ForegroundColor DarkGray
     Write-Host '  which relied on systeminfo.exe and ipconfig.  The new' -ForegroundColor DarkGray
     Write-Host '  version uses CIM/WMI queries for richer, structured' -ForegroundColor DarkGray
     Write-Host '  data and supports TXT and CSV export.' -ForegroundColor DarkGray
+    Write-Host ''
+    $adminLabel = if ($script:IsAdmin) { '[ADMIN]' } else { '[STANDARD USER]' }
+    $adminColor = if ($script:IsAdmin) { 'Green'  } else { 'Yellow' }
+    Write-Host '  Current privilege level: ' -ForegroundColor DarkGray -NoNewline
+    Write-Host $adminLabel -ForegroundColor $adminColor
+    if ($script:LogFile) {
+        Write-Host "  Session log file: $($script:LogFile)" -ForegroundColor DarkGray
+    }
     Write-Host ''
     Write-Host '  Press Enter to return to the main menu...' -ForegroundColor DarkGray -NoNewline
     $null = Read-Host
@@ -371,13 +547,22 @@ if ($ScanAndExport) {
 
     # Scan
     Write-Host '  [*] Starting system information scan...' -ForegroundColor Cyan
-    $script:ScanData = Get-SystemInfoData -ProgressCallback {
-        param([int]$Pct, [string]$Msg)
-        Write-Host "  [$Pct%] $Msg" -ForegroundColor White
+    $scanErr = $null
+    try {
+        $script:ScanData = Get-SystemInfoData -ProgressCallback {
+            param([int]$Pct, [string]$Msg)
+            Write-Host "  [$Pct%] $Msg" -ForegroundColor White
+        } -ErrorAction Stop
+        Write-SysInfoLog 'Non-interactive scan completed.' -Level INFO
+    }
+    catch {
+        $scanErr = $_
+        Write-SysInfoLog "Non-interactive scan failed: $($_.Exception.Message)" -Level ERROR
     }
 
-    if (-not $script:ScanData) {
+    if (-not $script:ScanData -or $scanErr) {
         Write-Host '  [!] Scan failed. Exiting.' -ForegroundColor Red
+        if ($scanErr) { Write-Host "  Error: $($scanErr.Exception.Message)" -ForegroundColor Red }
         exit 1
     }
 
@@ -385,7 +570,14 @@ if ($ScanAndExport) {
 
     # Resolve output path
     if (-not (Test-Path $OutputPath)) {
-        $null = New-Item -ItemType Directory -Path $OutputPath -Force
+        try {
+            $null = New-Item -ItemType Directory -Path $OutputPath -Force -ErrorAction Stop
+        }
+        catch {
+            Write-Host "  [!] Cannot create output directory: $OutputPath" -ForegroundColor Red
+            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            exit 1
+        }
     }
 
     Export-ScanResults -Format $OutputFormat -Directory $OutputPath
