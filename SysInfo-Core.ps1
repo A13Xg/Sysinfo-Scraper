@@ -22,6 +22,17 @@
 
 #Requires -Version 5.1
 
+# ── Admin privilege detection ──────────────────────────────────────────────────
+# Evaluated once when the module is dot-sourced by CLI or GUI front-ends.
+$script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+# Sentinel value shown (in red in CLI/GUI) when a value cannot be read without
+# elevated administrator privileges.
+$script:NeedsAdminPriv = 'Needs Admin Priv'
+
+# Path to the active session log file; set by Initialize-SysInfoLog.
+$script:LogFile = $null
+
 # ── Known-Models Hashtable ──────────────────────────────────────────────────────
 # Maps normalised "MakeModel" keys to image filenames used by Get-HardwareImagePath.
 
@@ -350,6 +361,176 @@ function Get-HardwareImagePath {
     return $fallback
 }
 
+# ── Logging Functions ──────────────────────────────────────────────────────────
+
+function Initialize-SysInfoLog {
+    <#
+    .SYNOPSIS
+        Creates and initialises a timestamped session log file.
+    .DESCRIPTION
+        Creates a log directory under $env:TEMP\SysInfoScraper\ if it does not
+        exist, then creates a new log file named SysInfo_<timestamp>.log and
+        writes a header block containing computer name, username, admin status,
+        and PowerShell version.  The path is stored in $script:LogFile for use
+        by Write-SysInfoLog.
+    .OUTPUTS
+        [string] Full path to the created log file.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $logDir = Join-Path $env:TEMP 'SysInfoScraper'
+    if (-not (Test-Path $logDir)) {
+        try {
+            $null = New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop
+        }
+        catch {
+            # Cannot create log directory; log to temp root as fallback
+            $logDir = $env:TEMP
+        }
+    }
+
+    $timestamp      = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $script:LogFile = Join-Path $logDir "SysInfo_${timestamp}.log"
+
+    $header = @(
+        '=' * 70
+        '  SysInfo Scraper - Session Log'
+        "  Started : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        "  Computer: $env:COMPUTERNAME"
+        "  User    : $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+        "  Admin   : $($script:IsAdmin)"
+        "  PS Ver  : $($PSVersionTable.PSVersion)"
+        '=' * 70
+        ''
+    )
+
+    try {
+        $header | Out-File -FilePath $script:LogFile -Encoding UTF8 -Force
+    }
+    catch {
+        # Silently suppress – logging is non-critical
+    }
+
+    return $script:LogFile
+}
+
+function Write-SysInfoLog {
+    <#
+    .SYNOPSIS
+        Appends a timestamped entry to the active session log file.
+    .DESCRIPTION
+        Writes a formatted log entry to the file initialised by Initialize-SysInfoLog.
+        If the log file has not been initialised the call is silently discarded.
+        Log failures are suppressed so that they never interrupt normal operation.
+    .PARAMETER Message
+        The message text to record.
+    .PARAMETER Level
+        Severity level: INFO, WARN, ERROR, or DEBUG.  Defaults to INFO.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG')]
+        [string]$Level = 'INFO'
+    )
+
+    if (-not $script:LogFile) { return }
+
+    $ts    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $entry = "[$ts] [$Level] $Message"
+
+    try {
+        $entry | Out-File -FilePath $script:LogFile -Encoding UTF8 -Append
+    }
+    catch {
+        # Suppress write failures to avoid cascading errors
+    }
+}
+
+function Test-IsAdministrator {
+    <#
+    .SYNOPSIS
+        Returns $true if the current process has administrator privileges.
+    .DESCRIPTION
+        Uses the .NET WindowsPrincipal class to check membership in the built-in
+        Administrators group.  This is the canonical, reliable way to detect
+        elevated privileges on Windows.
+    .OUTPUTS
+        [bool] $true when running as administrator, $false otherwise.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Request-AdminElevation {
+    <#
+    .SYNOPSIS
+        Attempts to re-launch the calling script with UAC-elevated privileges.
+    .DESCRIPTION
+        If the current process is already elevated this function returns $true
+        immediately.  Otherwise it tries to start a new PowerShell process using
+        the 'RunAs' verb (which triggers UAC).
+
+        If the user approves UAC the elevated process takes over and this function
+        calls exit 0 on the original (non-admin) process – so it will NEVER return
+        on success.
+
+        If the user declines UAC, or if UAC is disabled / blocked by policy, the
+        function catches the resulting error and returns $false so the caller can
+        continue running with standard user privileges.
+    .PARAMETER ScriptPath
+        Full path to the script to re-launch.  Callers should pass
+        $MyInvocation.MyCommand.Path or $PSCommandPath.
+    .PARAMETER OriginalArgs
+        Array of command-line arguments to forward to the elevated instance.
+    .OUTPUTS
+        [bool] $true if already admin, $false if elevation was declined or blocked.
+              Does not return if elevation was successful (exits current process).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ScriptPath,
+
+        [string[]]$OriginalArgs = @()
+    )
+
+    # Already elevated – nothing to do
+    if (Test-IsAdministrator) {
+        Write-SysInfoLog 'Process is already running with administrator privileges.' -Level INFO
+        return $true
+    }
+
+    Write-SysInfoLog "Requesting UAC elevation for: $ScriptPath" -Level INFO
+
+    # Build the argument list for the elevated PowerShell instance
+    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+    if ($OriginalArgs.Count -gt 0) {
+        $argList += ' ' + ($OriginalArgs -join ' ')
+    }
+
+    try {
+        Start-Process -FilePath 'powershell.exe' `
+                      -ArgumentList $argList `
+                      -Verb RunAs `
+                      -ErrorAction Stop
+
+        Write-SysInfoLog 'UAC elevation accepted; elevated process launched. Exiting non-admin instance.' -Level INFO
+        exit 0   # Elevated process takes over; exit this non-admin process
+    }
+    catch {
+        Write-SysInfoLog "UAC elevation failed or was denied: $($_.Exception.Message)" -Level WARN
+        return $false
+    }
+}
+
 # ── Main Data-Collection Function ──────────────────────────────────────────────
 
 function Get-SystemInfoData {
@@ -375,11 +556,13 @@ function Get-SystemInfoData {
     #>
     [CmdletBinding()]
     param(
-        [scriptblock]$ProgressCallback
+        [scriptblock]$ProgressCallback,
+
+        [bool]$IsAdmin = $script:IsAdmin
     )
 
     # Helper to report progress
-    $totalSteps = 11
+    $totalSteps = 17
     $currentStep = 0
     $reportProgress = {
         param([string]$Message)
@@ -424,8 +607,10 @@ function Get-SystemInfoData {
             SerialNumber       = $enc.SerialNumber
             AssetTag           = $enc.SMBIOSAssetTag
         }
+        Write-SysInfoLog 'SystemOverview: collected.' -Level INFO
     }
     catch {
+        Write-SysInfoLog "SystemOverview collection failed: $($_.Exception.Message)" -Level ERROR
         $info['SystemOverview'] = [PSCustomObject]@{
             ComputerName = $env:COMPUTERNAME
             CurrentUser  = $env:USERNAME
@@ -452,8 +637,10 @@ function Get-SystemInfoData {
             WindowsDirectory = $os.WindowsDirectory
             SystemDirectory  = $os.SystemDirectory
         }
+        Write-SysInfoLog 'OperatingSystem: collected.' -Level INFO
     }
     catch {
+        Write-SysInfoLog "OperatingSystem collection failed: $($_.Exception.Message)" -Level ERROR
         $info['OperatingSystem'] = [PSCustomObject]@{ Error = $_.Exception.Message }
     }
 
@@ -479,8 +666,10 @@ function Get-SystemInfoData {
             L3CacheSizeKB            = $cpu.L3CacheSize
             SocketDesignation        = $cpu.SocketDesignation
         }
+        Write-SysInfoLog 'Processor: collected.' -Level INFO
     }
     catch {
+        Write-SysInfoLog "Processor collection failed: $($_.Exception.Message)" -Level ERROR
         $info['Processor'] = [PSCustomObject]@{ Error = $_.Exception.Message }
     }
 
@@ -530,46 +719,75 @@ function Get-SystemInfoData {
             UsedSlots             = $usedSlots
             DIMMs                 = @($dimms)
         }
+        Write-SysInfoLog 'Memory: collected.' -Level INFO
     }
     catch {
+        Write-SysInfoLog "Memory collection failed: $($_.Exception.Message)" -Level ERROR
         $info['Memory'] = [PSCustomObject]@{ Error = $_.Exception.Message }
     }
 
     # ── 5. Storage ──────────────────────────────────────────────────────────────
     & $reportProgress 'Collecting storage info...'
     try {
-        # Physical disks via Storage namespace (preferred) with fallback
         $physicalDisks = @()
-        try {
-            $msftDisks = @(Get-CimInstance -Namespace root/Microsoft/Windows/Storage -ClassName MSFT_PhysicalDisk -ErrorAction Stop)
-            foreach ($d in $msftDisks) {
-                $physicalDisks += [PSCustomObject]@{
-                    Model          = $d.FriendlyName
-                    SerialNumber   = $d.SerialNumber
-                    SizeGB         = [math]::Round($d.Size / 1GB, 2)
-                    MediaType      = Get-DiskMediaType -MediaType $d.MediaType -BusType $d.BusType -Model $d.FriendlyName
-                    InterfaceType  = switch ($d.BusType) {
-                        1  { 'SCSI' }; 3  { 'ATA' }; 7  { 'USB' }
-                        11 { 'SATA' }; 17 { 'NVMe' }; default { "Other ($($d.BusType))" }
+        if ($IsAdmin) {
+            # MSFT_PhysicalDisk requires administrator privileges
+            try {
+                $msftDisks = @(Get-CimInstance -Namespace root/Microsoft/Windows/Storage `
+                               -ClassName MSFT_PhysicalDisk -ErrorAction Stop)
+                foreach ($d in $msftDisks) {
+                    $physicalDisks += [PSCustomObject]@{
+                        Model          = $d.FriendlyName
+                        SerialNumber   = $d.SerialNumber
+                        SizeGB         = [math]::Round($d.Size / 1GB, 2)
+                        MediaType      = Get-DiskMediaType -MediaType $d.MediaType -BusType $d.BusType -Model $d.FriendlyName
+                        InterfaceType  = switch ($d.BusType) {
+                            1  { 'SCSI' }; 3  { 'ATA' }; 7  { 'USB' }
+                            11 { 'SATA' }; 17 { 'NVMe' }; default { "Other ($($d.BusType))" }
+                        }
+                        Status         = $d.HealthStatus
+                        PartitionCount = ($d | Get-CimAssociatedInstance -ResultClassName MSFT_Partition -ErrorAction SilentlyContinue | Measure-Object).Count
                     }
-                    Status         = $d.HealthStatus
-                    PartitionCount = ($d | Get-CimAssociatedInstance -ResultClassName MSFT_Partition -ErrorAction SilentlyContinue | Measure-Object).Count
+                }
+                Write-SysInfoLog "Storage: collected $($physicalDisks.Count) physical disk(s) via MSFT_PhysicalDisk." -Level INFO
+            }
+            catch {
+                Write-SysInfoLog "Storage: MSFT_PhysicalDisk query failed ($($_.Exception.Message)); falling back to Win32_DiskDrive." -Level WARN
+                # Fallback to Win32_DiskDrive
+                $wmiDisks = @(Get-CimInstance -ClassName Win32_DiskDrive -ErrorAction Stop)
+                foreach ($d in $wmiDisks) {
+                    $physicalDisks += [PSCustomObject]@{
+                        Model          = $d.Model
+                        SerialNumber   = ($d.SerialNumber -replace '^\s+|\s+$', '')
+                        SizeGB         = [math]::Round($d.Size / 1GB, 2)
+                        MediaType      = Get-DiskMediaType -Model $d.Model
+                        InterfaceType  = $d.InterfaceType
+                        Status         = $d.Status
+                        PartitionCount = $d.Partitions
+                    }
                 }
             }
         }
-        catch {
-            # Fallback to Win32_DiskDrive
-            $wmiDisks = @(Get-CimInstance -ClassName Win32_DiskDrive -ErrorAction Stop)
-            foreach ($d in $wmiDisks) {
-                $physicalDisks += [PSCustomObject]@{
-                    Model          = $d.Model
-                    SerialNumber   = ($d.SerialNumber -replace '^\s+|\s+$', '')
-                    SizeGB         = [math]::Round($d.Size / 1GB, 2)
-                    MediaType      = Get-DiskMediaType -Model $d.Model
-                    InterfaceType  = $d.InterfaceType
-                    Status         = $d.Status
-                    PartitionCount = $d.Partitions
+        else {
+            # Not running as admin – use Win32_DiskDrive (available without elevation)
+            Write-SysInfoLog 'Storage: not admin; using Win32_DiskDrive (MSFT_PhysicalDisk requires admin).' -Level INFO
+            try {
+                $wmiDisks = @(Get-CimInstance -ClassName Win32_DiskDrive -ErrorAction Stop)
+                foreach ($d in $wmiDisks) {
+                    $physicalDisks += [PSCustomObject]@{
+                        Model          = $d.Model
+                        SerialNumber   = $script:NeedsAdminPriv
+                        SizeGB         = [math]::Round($d.Size / 1GB, 2)
+                        MediaType      = Get-DiskMediaType -Model $d.Model
+                        InterfaceType  = $d.InterfaceType
+                        Status         = $d.Status
+                        PartitionCount = $d.Partitions
+                    }
                 }
+            }
+            catch {
+                Write-SysInfoLog "Storage: Win32_DiskDrive query failed: $($_.Exception.Message)" -Level ERROR
+                throw
             }
         }
 
@@ -595,8 +813,10 @@ function Get-SystemInfoData {
             PhysicalDisks  = @($physicalDisks)
             LogicalVolumes = @($logicalVolumes)
         }
+        Write-SysInfoLog 'Storage: collected.' -Level INFO
     }
     catch {
+        Write-SysInfoLog "Storage collection failed: $($_.Exception.Message)" -Level ERROR
         $info['Storage'] = [PSCustomObject]@{ Error = $_.Exception.Message }
     }
 
@@ -620,8 +840,10 @@ function Get-SystemInfoData {
         }
 
         $info['Graphics'] = @($gpuList)
+        Write-SysInfoLog "Graphics: collected $($gpuList.Count) GPU(s)." -Level INFO
     }
     catch {
+        Write-SysInfoLog "Graphics collection failed: $($_.Exception.Message)" -Level ERROR
         $info['Graphics'] = @([PSCustomObject]@{ Error = $_.Exception.Message })
     }
 
@@ -651,8 +873,10 @@ function Get-SystemInfoData {
         }
 
         $info['NetworkAdapters'] = @($netList)
+        Write-SysInfoLog "NetworkAdapters: collected $($netList.Count) adapter(s)." -Level INFO
     }
     catch {
+        Write-SysInfoLog "NetworkAdapters collection failed: $($_.Exception.Message)" -Level ERROR
         $info['NetworkAdapters'] = @([PSCustomObject]@{ Error = $_.Exception.Message })
     }
 
@@ -667,8 +891,10 @@ function Get-SystemInfoData {
             BIOSDate         = $bios.ReleaseDate
             SMBIOSVersion    = $bios.SMBIOSBIOSVersion
         }
+        Write-SysInfoLog 'BIOS: collected.' -Level INFO
     }
     catch {
+        Write-SysInfoLog "BIOS collection failed: $($_.Exception.Message)" -Level ERROR
         $info['BIOS'] = [PSCustomObject]@{ Error = $_.Exception.Message }
     }
 
@@ -683,8 +909,10 @@ function Get-SystemInfoData {
             Version      = $mb.Version
             SerialNumber = $mb.SerialNumber
         }
+        Write-SysInfoLog 'Motherboard: collected.' -Level INFO
     }
     catch {
+        Write-SysInfoLog "Motherboard collection failed: $($_.Exception.Message)" -Level ERROR
         $info['Motherboard'] = [PSCustomObject]@{ Error = $_.Exception.Message }
     }
 
@@ -710,12 +938,15 @@ function Get-SystemInfoData {
                 FullChargeCapacity  = $fullChargeCap
                 BatteryHealth       = $health
             }
+            Write-SysInfoLog 'Battery: collected.' -Level INFO
         }
         else {
             $info['Battery'] = [PSCustomObject]@{ HasBattery = $false }
+            Write-SysInfoLog 'Battery: no battery detected.' -Level INFO
         }
     }
     catch {
+        Write-SysInfoLog "Battery collection failed: $($_.Exception.Message)" -Level ERROR
         $info['Battery'] = [PSCustomObject]@{ HasBattery = $false; Error = $_.Exception.Message }
     }
 
@@ -730,8 +961,10 @@ function Get-SystemInfoData {
                 InstalledOn = $h.InstalledOn
             }
         })
+        Write-SysInfoLog "Hotfixes: collected $($info['Hotfixes'].Count) hotfix(es)." -Level INFO
     }
     catch {
+        Write-SysInfoLog "Hotfixes collection failed: $($_.Exception.Message)" -Level ERROR
         $info['Hotfixes'] = @([PSCustomObject]@{ Error = $_.Exception.Message })
     }
 
@@ -744,9 +977,226 @@ function Get-SystemInfoData {
                 Location = $s.Location
             }
         })
+        Write-SysInfoLog "StartupPrograms: collected $($info['StartupPrograms'].Count) entry(ies)." -Level INFO
     }
     catch {
+        Write-SysInfoLog "StartupPrograms collection failed: $($_.Exception.Message)" -Level ERROR
         $info['StartupPrograms'] = @([PSCustomObject]@{ Error = $_.Exception.Message })
+    }
+
+    # ── 12. Security Information ────────────────────────────────────────────────
+    & $reportProgress 'Collecting security info...'
+    try {
+        # Antivirus products (via Windows Security Center)
+        $avProducts = @()
+        try {
+            $avRaw = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction Stop)
+            foreach ($av in $avRaw) {
+                # productState bit 4096 = enabled, bit 16 = up to date (simplified decode)
+                $stateHex  = '{0:X}' -f $av.productState
+                $enabled   = ($av.productState -band 0x1000) -ne 0
+                $upToDate  = ($av.productState -band 0x0010) -eq 0
+                $avProducts += [PSCustomObject]@{
+                    Name       = $av.displayName
+                    Enabled    = $enabled
+                    UpToDate   = $upToDate
+                    StateCode  = $stateHex
+                }
+            }
+        }
+        catch {
+            Write-SysInfoLog "Security: AntiVirusProduct query failed: $($_.Exception.Message)" -Level WARN
+        }
+
+        # Firewall products
+        $fwProducts = @()
+        try {
+            $fwRaw = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName FirewallProduct -ErrorAction Stop)
+            foreach ($fw in $fwRaw) {
+                $fwProducts += [PSCustomObject]@{
+                    Name    = $fw.displayName
+                    Enabled = ($fw.productState -band 0x1000) -ne 0
+                }
+            }
+        }
+        catch {
+            Write-SysInfoLog "Security: FirewallProduct query failed: $($_.Exception.Message)" -Level WARN
+        }
+
+        # Windows Defender real-time protection status via registry
+        $defenderRealTime = 'Unknown'
+        try {
+            $defReg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection' `
+                                       -Name 'DisableRealtimeMonitoring' -ErrorAction Stop
+            $defenderRealTime = if ($defReg.DisableRealtimeMonitoring -eq 0) { 'Enabled' } else { 'Disabled' }
+        }
+        catch {
+            $defenderRealTime = 'Unknown'
+        }
+
+        # BitLocker status (admin required for full details)
+        $bitLockerStatus = if ($IsAdmin) {
+            try {
+                $bl = Get-BitLockerVolume -ErrorAction Stop | Select-Object -First 1
+                if ($bl) { "$($bl.VolumeStatus) ($($bl.ProtectionStatus))" } else { 'Not configured' }
+            }
+            catch {
+                try {
+                    # Fallback: check via manage-bde
+                    $bdOut = & manage-bde -status C: 2>&1
+                    if ($bdOut -match 'Protection On') { 'Protection On' }
+                    elseif ($bdOut -match 'Protection Off') { 'Protection Off' }
+                    else { 'Unknown' }
+                }
+                catch { 'Unknown' }
+            }
+        }
+        else {
+            $script:NeedsAdminPriv
+        }
+
+        $info['Security'] = [PSCustomObject]@{
+            AntiVirusProducts    = @($avProducts)
+            FirewallProducts     = @($fwProducts)
+            DefenderRealTime     = $defenderRealTime
+            BitLockerStatus      = $bitLockerStatus
+        }
+        Write-SysInfoLog 'Security info collected.' -Level INFO
+    }
+    catch {
+        Write-SysInfoLog "Security info collection failed: $($_.Exception.Message)" -Level ERROR
+        $info['Security'] = [PSCustomObject]@{ Error = $_.Exception.Message }
+    }
+
+    # ── 13. Environment / Locale ───────────────────────────────────────────────
+    & $reportProgress 'Collecting environment info...'
+    try {
+        $tz      = [System.TimeZone]::CurrentTimeZone
+        $culture = [System.Globalization.CultureInfo]::CurrentCulture
+        $uiCulture = [System.Globalization.CultureInfo]::CurrentUICulture
+
+        $info['Environment'] = [PSCustomObject]@{
+            TimeZone        = $tz.StandardName
+            UTCOffset       = $tz.GetUtcOffset((Get-Date)).ToString()
+            SystemLocale    = $culture.Name
+            SystemLanguage  = $uiCulture.EnglishName
+            OSLanguage      = $uiCulture.Name
+            PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+            CLRVersion      = $PSVersionTable.CLRVersion.ToString()
+            ExecutionPolicy = (Get-ExecutionPolicy).ToString()
+        }
+        Write-SysInfoLog 'Environment info collected.' -Level INFO
+    }
+    catch {
+        Write-SysInfoLog "Environment info collection failed: $($_.Exception.Message)" -Level ERROR
+        $info['Environment'] = [PSCustomObject]@{ Error = $_.Exception.Message }
+    }
+
+    # ── 14. Display Monitors ───────────────────────────────────────────────────
+    & $reportProgress 'Collecting display info...'
+    try {
+        $monitors = @(Get-CimInstance -ClassName Win32_DesktopMonitor -ErrorAction Stop)
+        $displayList = foreach ($m in $monitors) {
+            [PSCustomObject]@{
+                Name             = $m.Name
+                Manufacturer     = $m.MonitorManufacturer
+                ScreenWidth      = $m.ScreenWidth
+                ScreenHeight     = $m.ScreenHeight
+                PixelsPerXLogicalInch = $m.PixelsPerXLogicalInch
+                PixelsPerYLogicalInch = $m.PixelsPerYLogicalInch
+                MonitorType      = $m.MonitorType
+                Status           = $m.Status
+            }
+        }
+        $info['Displays'] = @($displayList)
+        Write-SysInfoLog "Displays: collected $($displayList.Count) monitor(s)." -Level INFO
+    }
+    catch {
+        Write-SysInfoLog "Display info collection failed: $($_.Exception.Message)" -Level ERROR
+        $info['Displays'] = @([PSCustomObject]@{ Error = $_.Exception.Message })
+    }
+
+    # ── 15. Installed Software ─────────────────────────────────────────────────
+    & $reportProgress 'Collecting installed software...'
+    try {
+        $regPaths = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+            'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+            'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        )
+
+        $softwareHash = @{}  # Deduplicate by DisplayName+Version
+        foreach ($path in $regPaths) {
+            try {
+                $items = @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue)
+                foreach ($item in $items) {
+                    if (-not [string]::IsNullOrWhiteSpace($item.DisplayName)) {
+                        $key = "$($item.DisplayName)|$($item.DisplayVersion)"
+                        if (-not $softwareHash.ContainsKey($key)) {
+                            $softwareHash[$key] = [PSCustomObject]@{
+                                Name        = $item.DisplayName
+                                Version     = if ($item.DisplayVersion) { $item.DisplayVersion } else { '' }
+                                Publisher   = if ($item.Publisher) { $item.Publisher } else { '' }
+                                InstallDate = if ($item.InstallDate) { $item.InstallDate } else { '' }
+                            }
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-SysInfoLog "InstalledSoftware: could not read path $path : $($_.Exception.Message)" -Level WARN
+            }
+        }
+
+        $info['InstalledSoftware'] = @($softwareHash.Values | Sort-Object Name)
+        Write-SysInfoLog "InstalledSoftware: found $($info['InstalledSoftware'].Count) installed application(s)." -Level INFO
+    }
+    catch {
+        Write-SysInfoLog "InstalledSoftware collection failed: $($_.Exception.Message)" -Level ERROR
+        $info['InstalledSoftware'] = @([PSCustomObject]@{ Error = $_.Exception.Message })
+    }
+
+    # ── 16. Sound Devices ─────────────────────────────────────────────────────
+    & $reportProgress 'Collecting sound device info...'
+    try {
+        $soundDevs = @(Get-CimInstance -ClassName Win32_SoundDevice -ErrorAction Stop)
+        $soundList = foreach ($s in $soundDevs) {
+            [PSCustomObject]@{
+                Name         = $s.Name
+                Manufacturer = $s.Manufacturer
+                Status       = $s.Status
+                DeviceID     = $s.DeviceID
+            }
+        }
+        $info['SoundDevices'] = @($soundList)
+        Write-SysInfoLog "SoundDevices: collected $($soundList.Count) device(s)." -Level INFO
+    }
+    catch {
+        Write-SysInfoLog "Sound device collection failed: $($_.Exception.Message)" -Level ERROR
+        $info['SoundDevices'] = @([PSCustomObject]@{ Error = $_.Exception.Message })
+    }
+
+    # ── 17. Printers ──────────────────────────────────────────────────────────
+    & $reportProgress 'Collecting printer info...'
+    try {
+        $printers = @(Get-CimInstance -ClassName Win32_Printer -ErrorAction Stop)
+        $printerList = foreach ($p in $printers) {
+            [PSCustomObject]@{
+                Name           = $p.Name
+                PortName       = $p.PortName
+                DriverName     = $p.DriverName
+                Default        = $p.Default
+                NetworkPrinter = $p.Network
+                Status         = $p.PrinterStatus
+                Shared         = $p.Shared
+            }
+        }
+        $info['Printers'] = @($printerList)
+        Write-SysInfoLog "Printers: collected $($printerList.Count) printer(s)." -Level INFO
+    }
+    catch {
+        Write-SysInfoLog "Printer collection failed: $($_.Exception.Message)" -Level ERROR
+        $info['Printers'] = @([PSCustomObject]@{ Error = $_.Exception.Message })
     }
 
     Write-Progress -Activity 'System Information Scan' -Completed
@@ -923,6 +1373,77 @@ function Export-SystemInfoTXT {
         $lines.Add('')
     }
 
+    # 13. Security
+    if ($Data.Security) {
+        & $writeSection 'SECURITY'
+        if ($Data.Security.Error) {
+            $lines.Add("  Error: $($Data.Security.Error)")
+            $lines.Add('')
+        } else {
+            $lines.Add("  Windows Defender Real-Time Protection: $($Data.Security.DefenderRealTime)")
+            $lines.Add("  BitLocker Status                     : $($Data.Security.BitLockerStatus)")
+            $lines.Add('')
+            if ($Data.Security.AntiVirusProducts) {
+                $lines.Add('  Antivirus Products:')
+                foreach ($av in $Data.Security.AntiVirusProducts) {
+                    $lines.Add("    - $($av.Name)  Enabled:$($av.Enabled)  UpToDate:$($av.UpToDate)")
+                }
+                $lines.Add('')
+            }
+            if ($Data.Security.FirewallProducts) {
+                $lines.Add('  Firewall Products:')
+                foreach ($fw in $Data.Security.FirewallProducts) {
+                    $lines.Add("    - $($fw.Name)  Enabled:$($fw.Enabled)")
+                }
+                $lines.Add('')
+            }
+        }
+    }
+
+    # 14. Environment
+    if ($Data.Environment) {
+        & $writeSection 'ENVIRONMENT / LOCALE'
+        & $writeProps $Data.Environment
+    }
+
+    # 15. Displays
+    if ($Data.Displays) {
+        & $writeSection 'DISPLAY MONITORS'
+        $i = 1
+        foreach ($disp in $Data.Displays) {
+            $lines.Add("    [$i] $($disp.Name)  Resolution: $($disp.ScreenWidth)x$($disp.ScreenHeight)  Status: $($disp.Status)")
+            $i++
+        }
+        $lines.Add('')
+    }
+
+    # 16. Installed Software
+    if ($Data.InstalledSoftware) {
+        & $writeSection 'INSTALLED SOFTWARE'
+        foreach ($sw in $Data.InstalledSoftware) {
+            $lines.Add("    $($sw.Name)  v$($sw.Version)  [$($sw.Publisher)]")
+        }
+        $lines.Add('')
+    }
+
+    # 17. Sound Devices
+    if ($Data.SoundDevices) {
+        & $writeSection 'SOUND DEVICES'
+        foreach ($s in $Data.SoundDevices) {
+            $lines.Add("    $($s.Name)  Manufacturer: $($s.Manufacturer)  Status: $($s.Status)")
+        }
+        $lines.Add('')
+    }
+
+    # 18. Printers
+    if ($Data.Printers) {
+        & $writeSection 'PRINTERS'
+        foreach ($p in $Data.Printers) {
+            $lines.Add("    $($p.Name)  Driver: $($p.DriverName)  Default: $($p.Default)  Network: $($p.NetworkPrinter)")
+        }
+        $lines.Add('')
+    }
+
     $lines.Add($sep)
     $lines.Add('  End of Report')
     $lines.Add($sep)
@@ -1027,6 +1548,51 @@ function Export-SystemInfoCSV {
                 $idx++
             }
         }
+    }
+
+    # Security (scalar + nested arrays)
+    if ($Data.Security) {
+        $rows.Add([PSCustomObject]@{ Category = 'Security'; Property = 'DefenderRealTime'; Value = "$($Data.Security.DefenderRealTime)" })
+        $rows.Add([PSCustomObject]@{ Category = 'Security'; Property = 'BitLockerStatus';  Value = "$($Data.Security.BitLockerStatus)" })
+        if ($Data.Security.AntiVirusProducts) {
+            $idx = 0
+            foreach ($av in $Data.Security.AntiVirusProducts) {
+                & $addObject 'Security' $av "AV[$idx]"; $idx++
+            }
+        }
+        if ($Data.Security.FirewallProducts) {
+            $idx = 0
+            foreach ($fw in $Data.Security.FirewallProducts) {
+                & $addObject 'Security' $fw "FW[$idx]"; $idx++
+            }
+        }
+    }
+
+    # Environment
+    if ($Data.Environment) { & $addObject 'Environment' $Data.Environment '' }
+
+    # Displays
+    if ($Data.Displays) {
+        $idx = 0
+        foreach ($disp in $Data.Displays) { & $addObject 'Displays' $disp "Display[$idx]"; $idx++ }
+    }
+
+    # InstalledSoftware
+    if ($Data.InstalledSoftware) {
+        $idx = 0
+        foreach ($sw in $Data.InstalledSoftware) { & $addObject 'InstalledSoftware' $sw "SW[$idx]"; $idx++ }
+    }
+
+    # SoundDevices
+    if ($Data.SoundDevices) {
+        $idx = 0
+        foreach ($s in $Data.SoundDevices) { & $addObject 'SoundDevices' $s "Sound[$idx]"; $idx++ }
+    }
+
+    # Printers
+    if ($Data.Printers) {
+        $idx = 0
+        foreach ($p in $Data.Printers) { & $addObject 'Printers' $p "Printer[$idx]"; $idx++ }
     }
 
     $rows | Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8 -Force
@@ -1203,6 +1769,58 @@ function Format-SystemInfoTable {
     # 10. Battery
     if ($Data.Battery) {
         & $renderSection 'BATTERY' { & $renderProps $Data.Battery }
+    }
+
+    # 11. Security
+    if ($Data.Security -and -not $Data.Security.Error) {
+        & $renderSection 'SECURITY' {
+            [void]$sb.AppendLine((& $kvLine 'Defender Real-Time' "$($Data.Security.DefenderRealTime)"))
+            [void]$sb.AppendLine((& $kvLine 'BitLocker Status' "$($Data.Security.BitLockerStatus)"))
+            if ($Data.Security.AntiVirusProducts) {
+                [void]$sb.AppendLine((& $textLine '  Antivirus:'))
+                foreach ($av in $Data.Security.AntiVirusProducts) {
+                    [void]$sb.AppendLine((& $textLine "   - $($av.Name) [Enabled:$($av.Enabled)]"))
+                }
+            }
+        }
+    }
+
+    # 12. Environment
+    if ($Data.Environment) {
+        & $renderSection 'ENVIRONMENT' { & $renderProps $Data.Environment }
+    }
+
+    # 13. Displays
+    if ($Data.Displays) {
+        & $renderSection 'DISPLAY MONITORS' {
+            $i = 1
+            foreach ($disp in $Data.Displays) {
+                [void]$sb.AppendLine((& $textLine "   [$i] $($disp.Name) $($disp.ScreenWidth)x$($disp.ScreenHeight)"))
+                $i++
+            }
+        }
+    }
+
+    # 14. Sound Devices
+    if ($Data.SoundDevices) {
+        & $renderSection 'SOUND DEVICES' {
+            $i = 1
+            foreach ($s in $Data.SoundDevices) {
+                [void]$sb.AppendLine((& $textLine "   [$i] $($s.Name) [$($s.Status)]"))
+                $i++
+            }
+        }
+    }
+
+    # 15. Printers
+    if ($Data.Printers) {
+        & $renderSection 'PRINTERS' {
+            $i = 1
+            foreach ($p in $Data.Printers) {
+                [void]$sb.AppendLine((& $textLine "   [$i] $($p.Name) [Default:$($p.Default)]"))
+                $i++
+            }
+        }
     }
 
     return $sb.ToString()
