@@ -1071,7 +1071,7 @@ function Get-SystemInfoData {
     # ── 13. Environment / Locale ───────────────────────────────────────────────
     & $reportProgress 'Collecting environment info...'
     try {
-        $tz      = [System.TimeZone]::CurrentTimeZone
+        $tz      = [System.TimeZoneInfo]::Local
         $culture = [System.Globalization.CultureInfo]::CurrentCulture
         $uiCulture = [System.Globalization.CultureInfo]::CurrentUICulture
 
