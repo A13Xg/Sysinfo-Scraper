@@ -1,20 +1,80 @@
 # Sysinfo-Scraper
-A small BATCH script that is designed to extract system info quickly and dump to a .txt file.
 
-## See bottom for MD5 Hash ##
+A system information collection tool for Windows. Started as a small batch script and now includes comprehensive PowerShell scripts with CLI and GUI interfaces.
 
-How to Install:
+## Scripts
 
-1. Download the whole repository as a compressed *.zip* file and then run 'Scrape-Info.bat' as Administrator.
+| Script | Description |
+|---|---|
+| `Scrape Info.bat` | Legacy batch script — collects basic systeminfo and ipconfig output to a text file |
+| `SysInfo-CLI.ps1` | **PowerShell CLI** — interactive menu-driven interface with verbose progress, stylized console table output, and TXT/CSV export |
+| `SysInfo-GUI.ps1` | **PowerShell GUI** — WPF-based graphical interface with tabbed data display, hardware image support, status bar, and export options |
+| `SysInfo-Core.ps1` | Shared core module — dot-sourced by both CLI and GUI scripts; contains all data collection, export, and utility functions |
 
+## Requirements
 
-***Note: This batch file will work without Admin priveleges***
+- **Windows** with PowerShell 5.1 or later
+- Administrator privileges are recommended for full data access but not required
 
+## Quick Start
 
+### CLI (Interactive)
+```powershell
+.\SysInfo-CLI.ps1
+```
 
-*Thank you for using my script!*
+### CLI (Non-Interactive / Headless)
+```powershell
+.\SysInfo-CLI.ps1 -ScanAndExport -OutputFormat Both -OutputPath C:\Reports
+```
 
-# -@13X #
+### GUI
+```powershell
+.\SysInfo-GUI.ps1
+```
+
+Or right-click `SysInfo-GUI.ps1` → **Run with PowerShell**.
+
+### Legacy Batch
+```
+"Scrape Info.bat"
+```
+
+## Data Collected (v2.0)
+
+The PowerShell scripts collect **11 categories** of system information:
+
+1. **System Overview** — Computer name, user, domain, manufacturer, model, serial number, asset tag, chassis type
+2. **Operating System** — Name, version, build, architecture, install date, last boot, uptime
+3. **Processor** — Name, cores, threads, clock speeds, cache sizes, socket
+4. **Memory (RAM)** — Total/available/used, usage percent, slot count, individual DIMM details
+5. **Storage** — Physical disks (model, size, type SSD/HDD/NVMe, health) and logical volumes
+6. **Graphics / GPU** — Name, driver, VRAM, resolution, refresh rate
+7. **Network Adapters** — Name, MAC, IP, gateway, DNS, DHCP configuration
+8. **BIOS** — Manufacturer, version, date, SMBIOS version
+9. **Motherboard** — Manufacturer, product, version, serial number
+10. **Battery** — Status, charge, health, capacity (if present)
+11. **Hotfixes & Startup Programs**
+
+## Hardware Images (GUI)
+
+The GUI displays a product image for the detected hardware. Place PNG images in the `hardwareImages/` directory. The image resolver uses a four-tier fallback:
+
+1. Exact model match (e.g., `DellOptiplex7080.png`)
+2. Manufacturer + type generic (e.g., `DellGenericLaptop.png`)
+3. Manufacturer generic (e.g., `DellGeneric.png`)
+4. Global fallback (`GenericComputer.png`)
+
+See [`hardwareImages/README.md`](hardwareImages/README.md) for the full list of supported models and required images.
+
+## Export Formats
+
+- **TXT** — Formatted plain-text report with headers and separators
+- **CSV** — Structured `Category, Property, Value` format for spreadsheet import
+
+Files are named `SysInfo_{ComputerName}_{Timestamp}.txt/csv`.
+
+# — @13X —
 
 
 
